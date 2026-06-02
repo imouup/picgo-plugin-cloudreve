@@ -3,7 +3,6 @@
 const path = require('path')
 const {
   CloudreveWebDAVClient,
-  buildPublicUrl,
   contentTypeFromExt,
   createUploadItem,
   getFileBuffer,
@@ -23,8 +22,10 @@ function readConfig (ctx) {
     password: config.password,
     davPath: config.davPath || '/dav',
     remotePath: config.remotePath || '',
-    publicUrlPrefix: config.publicUrlPrefix || '',
-    publicUrlTemplate: config.publicUrlTemplate || '',
+    apiVersion: config.apiVersion || 'v4',
+    apiToken: config.apiToken || '',
+    sessionCookie: config.sessionCookie || '',
+    fileUriPrefix: config.fileUriPrefix || 'cloudreve://my',
     timeout: Number(config.timeout) || 30000,
     rename: config.rename === true || config.rename === 'true'
   }
@@ -74,20 +75,37 @@ function uploaderConfig (ctx) {
       message: '相对 WebDAV 根目录的上传目录，例如：Pictures/PicGo'
     },
     {
-      name: 'publicUrlPrefix',
-      type: 'input',
-      alias: '公开访问前缀',
-      default: userConfig.publicUrlPrefix || '',
-      required: false,
-      message: '例如：https://img.example.com/Pictures/PicGo；留空时使用服务地址拼接远程路径'
+      name: 'apiVersion',
+      type: 'list',
+      alias: 'Cloudreve API 版本',
+      choices: ['v4', 'v3'],
+      default: userConfig.apiVersion || 'v4',
+      required: true,
+      message: 'Cloudreve v4 推荐使用 API Token 获取直链；v3 使用会话 Cookie 获取直链'
     },
     {
-      name: 'publicUrlTemplate',
-      type: 'input',
-      alias: '公开访问模板',
-      default: userConfig.publicUrlTemplate || '',
+      name: 'apiToken',
+      type: 'password',
+      alias: 'v4 API Token/JWT',
+      default: userConfig.apiToken || '',
       required: false,
-      message: '可选，优先级高于公开访问前缀。支持 {path}、{rawPath}、{filename}、{rawFilename}'
+      message: 'Cloudreve v4 获取直链接口的 Bearer Token；选择 v4 时必填'
+    },
+    {
+      name: 'sessionCookie',
+      type: 'password',
+      alias: 'v3 会话 Cookie',
+      default: userConfig.sessionCookie || '',
+      required: false,
+      message: 'Cloudreve v3 已登录会话 Cookie，例如 cloudreve-session=...；选择 v3 时必填'
+    },
+    {
+      name: 'fileUriPrefix',
+      type: 'input',
+      alias: '文件 URI 前缀',
+      default: userConfig.fileUriPrefix || 'cloudreve://my',
+      required: false,
+      message: 'v4 获取直链使用，例如 cloudreve://my 或 cloudreve://my/已绑定根目录'
     },
     {
       name: 'timeout',
@@ -130,7 +148,7 @@ async function handle (ctx) {
 
   await client.ensureDirectory(remoteDir)
 
-  const nextOutput = []
+  const uploadedItems = []
   for (let index = 0; index < sourceItems.length; index += 1) {
     const item = createUploadItem(input[index], existingOutput[index], index)
     const fileName = getFileName(item, index, config.rename)
@@ -139,15 +157,17 @@ async function handle (ctx) {
     const contentType = item.mimeType || item.mimetype || contentTypeFromExt(fileName)
 
     await client.uploadBuffer(buffer, remoteFilePath, contentType)
-
-    nextOutput.push({
-      ...item,
-      fileName,
-      extname: item.extname || path.extname(fileName),
-      imgUrl: buildPublicUrl(config, remoteFilePath),
-      type: UPLOADER_ID
-    })
+    uploadedItems.push({ item, fileName, remoteFilePath })
   }
+
+  const directLinks = await client.getDirectLinks(uploadedItems.map(uploaded => uploaded.remoteFilePath))
+  const nextOutput = uploadedItems.map((uploaded, index) => ({
+    ...uploaded.item,
+    fileName: uploaded.fileName,
+    extname: uploaded.item.extname || path.extname(uploaded.fileName),
+    imgUrl: directLinks[index],
+    type: UPLOADER_ID
+  }))
 
   ctx.output = nextOutput
   return ctx

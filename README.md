@@ -1,12 +1,17 @@
 # picgo-plugin-cloudreve
 
-PicGo uploader plugin for using Cloudreve v3/v4 as an image host. The plugin uploads files through Cloudreve WebDAV, which gives a simple and long-lived authentication flow and lets you bind uploads to a fixed directory.
+PicGo uploader plugin for using Cloudreve v3/v4 as an image host. The plugin uploads files through Cloudreve WebDAV, then calls Cloudreve's own "get direct link" API so PicGo receives the same direct link that Cloudreve would generate in its web UI.
 
-## Why WebDAV
+## Why WebDAV + direct link API
 
-Cloudreve v3 and v4 both provide WebDAV access. Compared with short-lived web sessions or version-specific REST upload sessions, WebDAV credentials are easier to keep in PicGo and are suitable for long-term unattended uploads.
+Cloudreve v3 and v4 both provide WebDAV access. WebDAV credentials are independent from normal login passwords and can be kept in PicGo for unattended uploads.
 
-Cloudreve WebDAV accounts are independent from normal login passwords. Create a dedicated WebDAV account in Cloudreve, copy the generated password, and optionally bind that WebDAV account to a relative root directory. After binding, this plugin can only see and upload inside that root, and the `remotePath` setting becomes a subdirectory below it.
+Cloudreve WebDAV accounts can also be bound to a relative root directory. After binding, this plugin can only upload inside that root, and the `remotePath` setting becomes a subdirectory below it.
+
+The final image URL is **not** guessed by concatenating a custom prefix. After each upload, the plugin asks Cloudreve to create or return the file's direct link:
+
+- Cloudreve v4: `PUT /api/v4/file/source` with `uris: ["cloudreve://my/..."]`.
+- Cloudreve v3: list the uploaded directory to find the file ID, then `POST /api/v3/file/source` with `items: [...]`.
 
 ## Install
 
@@ -33,12 +38,38 @@ Select `Cloudreve` as the uploader and fill in these fields:
 | `password` | Yes | `cloudreve-generated-password` | Cloudreve generated WebDAV password. |
 | `davPath` | Yes | `/dav` | WebDAV endpoint path. Cloudreve commonly uses `/dav`. |
 | `remotePath` | No | `Pictures/PicGo` | Upload directory relative to the WebDAV root or the bound WebDAV account root. The plugin creates missing folders with `MKCOL`. |
-| `publicUrlPrefix` | No | `https://img.example.com/Pictures/PicGo` | Public URL prefix used to construct PicGo `imgUrl`. |
-| `publicUrlTemplate` | No | `https://cdn.example.com/{path}` | Advanced public URL template. Overrides `publicUrlPrefix`. Supports `{path}`, `{rawPath}`, `{filename}`, and `{rawFilename}`. |
+| `apiVersion` | Yes | `v4` | Select `v4` or `v3` for the Cloudreve direct link API. |
+| `apiToken` | v4 only | `eyJ...` | Cloudreve v4 Bearer Token/JWT used by `PUT /api/v4/file/source`. You may paste either the raw token or `Bearer <token>`. |
+| `sessionCookie` | v3 only | `cloudreve-session=...` | Cloudreve v3 logged-in session cookie used by directory listing and `POST /api/v3/file/source`. |
+| `fileUriPrefix` | v4 only | `cloudreve://my` | Prefix used to build v4 file URIs. If your WebDAV account is bound to a Cloudreve root such as `Pictures`, set this to `cloudreve://my/Pictures`. |
 | `timeout` | No | `30000` | Request timeout in milliseconds. |
 | `rename` | No | `true` | Add timestamp and index before original filename to avoid overwriting existing files. |
 
-Example PicGo config snippet:
+### Cloudreve v4 example
+
+```json
+{
+  "picBed": {
+    "current": "cloudreve",
+    "cloudreve": {
+      "serverUrl": "https://cloud.example.com",
+      "username": "me@example.com",
+      "password": "your-webdav-password",
+      "davPath": "/dav",
+      "remotePath": "PicGo",
+      "apiVersion": "v4",
+      "apiToken": "your-cloudreve-v4-jwt-or-api-token",
+      "fileUriPrefix": "cloudreve://my/Pictures",
+      "timeout": 30000,
+      "rename": true
+    }
+  }
+}
+```
+
+In the example above, the WebDAV account is assumed to be bound to the Cloudreve `Pictures` directory, so uploading to WebDAV `PicGo/cat.png` maps to the v4 file URI `cloudreve://my/Pictures/PicGo/cat.png`.
+
+### Cloudreve v3 example
 
 ```json
 {
@@ -50,7 +81,8 @@ Example PicGo config snippet:
       "password": "your-webdav-password",
       "davPath": "/dav",
       "remotePath": "Pictures/PicGo",
-      "publicUrlPrefix": "https://img.example.com/Pictures/PicGo",
+      "apiVersion": "v3",
+      "sessionCookie": "cloudreve-session=your-session-cookie",
       "timeout": 30000,
       "rename": true
     }
@@ -58,24 +90,15 @@ Example PicGo config snippet:
 }
 ```
 
-## URL generation
-
-Cloudreve's WebDAV upload endpoint is not necessarily the same as the public image URL. Configure one of the following according to your Cloudreve deployment:
-
-1. **`publicUrlPrefix`**: appends the encoded uploaded path to a fixed prefix.
-2. **`publicUrlTemplate`**: gives full control over the final URL. Placeholders:
-   - `{path}`: URL-encoded remote path without the leading slash.
-   - `{rawPath}`: raw remote path without the leading slash.
-   - `{filename}`: URL-encoded filename.
-   - `{rawFilename}`: raw filename.
-3. If both are empty, the plugin falls back to `serverUrl + encoded remote path`.
+Cloudreve v3's source API accepts file IDs instead of paths. The plugin therefore lists `remotePath` after upload, finds the uploaded file by name, and sends its ID to Cloudreve's source API.
 
 ## Upload flow
 
 1. Read files from PicGo's transformed output or input file paths.
 2. Create the configured `remotePath` recursively via WebDAV `MKCOL`.
 3. Upload each image with WebDAV `PUT` and Basic authentication.
-4. Return PicGo output items with `imgUrl`, `fileName`, `extname`, and `type: "cloudreve"`.
+4. Call Cloudreve's direct link API for the uploaded file.
+5. Return PicGo output items with `imgUrl` set to the Cloudreve-generated direct link, plus `fileName`, `extname`, and `type: "cloudreve"`.
 
 ## Development
 
@@ -88,6 +111,7 @@ The implementation has no runtime dependencies beyond Node.js built-in modules.
 
 ## Notes
 
-- Keep the WebDAV password secret; do not commit it to this repository.
+- Keep WebDAV passwords, v4 tokens, and v3 session cookies secret; do not commit them to this repository.
 - Prefer creating a dedicated Cloudreve WebDAV account and binding it to a narrow root directory.
-- If the final image URL requires a Cloudreve share link or CDN rewrite, use `publicUrlTemplate`.
+- For v4, make sure `fileUriPrefix + remotePath + filename` matches the actual Cloudreve file URI, otherwise the direct link API cannot find the uploaded file.
+- Cloudreve group settings must allow source/direct link creation for the account used by the API token or session cookie.
